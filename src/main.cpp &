@@ -1,0 +1,192 @@
+#include <iostream>
+#include <string>
+#include <vector>
+#include <set>
+#include <fstream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+struct ProjectInfo {
+    std::vector<std::string> source_files;
+    std::vector<std::string> header_files;
+    std::vector<std::string> flags;
+    std::set<std::string> include_dirs;
+    std::set<std::string> library;
+    std::string project_name = "nae";
+    std::string compiler = "g++";
+    std::string cpp_standard = "c++17";
+};
+
+void check_lib(const std::string &include_line, ProjectInfo &project) {
+    if (include_line.find("GL/glut.h") != std::string::npos) {
+        project.library.insert("GL");
+        project.library.insert("GLU");
+        project.library.insert("glut");
+    }
+    else if (include_line.find("SDL2/SDL.h") != std::string::npos) {
+        project.library.insert("SDL2");
+    }
+    else if (include_line.find("opencv2/") != std::string::npos) {
+        project.library.insert("opencv_core");
+        project.library.insert("opencv_imgproc");
+        project.library.insert("opencv_highgui");
+    }
+    else if (include_line.find("SFML/") != std::string::npos) {
+        project.library.insert("sfml-graphics");
+        project.library.insert("sfml-window");
+        project.library.insert("sfml-system");
+    }
+}
+
+void scanProject(ProjectInfo &project) {
+    for (const auto &e : fs::recursive_directory_iterator(".")) {
+        if (!e.is_regular_file()) continue;
+        const auto ext = e.path().extension().string();
+        const auto filepath = e.path().string();
+
+        if (ext == ".cpp") {
+            std::ifstream file(filepath);
+            if (!file.is_open()) {
+                std::cerr << "Warning: could not open " << filepath << '\n';
+                continue;
+            }
+
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.find("#include") != std::string::npos)
+                    check_lib(line, project);
+            }
+            project.source_files.push_back(filepath);
+        }
+        else if (ext == ".hpp" || ext == ".h") {
+            project.header_files.push_back(filepath);
+            project.include_dirs.insert(e.path().parent_path().string());
+        }
+    }
+}
+
+void generate_makefile(const ProjectInfo &info, const std::string &filename) {
+    std::ofstream makefile(filename);
+    makefile << "# Automatically generated Makefile\n";
+    makefile << "CXX = " << info.compiler << '\n';
+    makefile << "CXXFLAGS = -std=" << info.cpp_standard << " -Wall -Wextra -MMD -MP\n";
+
+    if (!info.include_dirs.empty()) {
+        makefile << "INCLUDES = ";
+        for (const auto &dir : info.include_dirs)
+            makefile << "-I\"" << dir << "\" ";
+        makefile << '\n';
+    }
+
+    if (!info.library.empty()) {
+        makefile << "LIBS = ";
+        for (const auto &lib : info.library)
+            makefile << "-l" << lib << " ";
+        makefile << '\n';
+    }
+
+    if (info.source_files.empty()) {
+        makefile << "TARGET = " << info.project_name << "\n\n";
+        makefile << "all:\n\t@echo \"No source files found.\"\n";
+        makefile << "clean:\n\t@echo \"Nothing to clean.\"\n";
+        makefile << ".PHONY: all clean\n";
+        return;
+    }
+
+    makefile << "SOURCES = ";
+    for (size_t i = 0; i < info.source_files.size(); ++i) {
+        makefile << '"' << info.source_files[i] << '"';
+        if (i + 1 != info.source_files.size())
+            makefile << " \\\n\t";
+        else
+            makefile << '\n';
+    }
+
+    makefile << "\nOBJECTS = $(SOURCES:.cpp=.o)\n";
+    makefile << "DEPS = $(OBJECTS:.o=.d)\n\n";
+    makefile << "TARGET = " << info.project_name << "\n\n";
+
+    makefile << "all: $(TARGET)\n\n";
+    makefile << "$(TARGET): $(OBJECTS)\n";
+    makefile << "\t$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)\n\n";
+
+    makefile << "%.o: %.cpp\n";
+    makefile << "\t$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@\n\n";
+
+    makefile << "clean:\n";
+    makefile << "\trm -f $(OBJECTS) $(DEPS) $(TARGET)\n\n";
+
+    makefile << ".PHONY: all clean\n";
+    makefile << "-include $(DEPS)\n";
+}
+
+void user_setup(ProjectInfo &p) {
+    std::cout << "=== Project Setup ===\n";
+
+    std::cout << "Enter project name [" << p.project_name << "]: ";
+    std::string input;
+    std::getline(std::cin, input);
+    if (!input.empty()) p.project_name = input;
+
+    std::cout << "Enter compiler [" << p.compiler << "]: ";
+    std::getline(std::cin, input);
+    if (!input.empty()) p.compiler = input;
+
+    std::cout << "Enter C++ standard (c++11, c++17, c++20) [" << p.cpp_standard << "]: ";
+    std::getline(std::cin, input);
+    if (!input.empty()) p.cpp_standard = input;
+
+    std::cout << "Auto-scan current directory for sources and includes? (y/n): ";
+    std::getline(std::cin, input);
+    if (input == "y" || input == "Y") {
+        scanProject(p);
+        std::cout << "Found " << p.source_files.size() << " source files, "
+                  << p.header_files.size() << " headers.\n";
+    } else {
+        std::cout << "Enter source files (end with empty line):\n";
+        while (true) {
+            std::getline(std::cin, input);
+            if (input.empty()) break;
+            p.source_files.push_back(input);
+        }
+    }
+
+    std::cout << "Add extra include directories? (y/n): ";
+    std::getline(std::cin, input);
+    if (input == "y" || input == "Y") {
+        std::cout << "Enter include dirs (end with empty line):\n";
+        while (true) {
+            std::getline(std::cin, input);
+            if (input.empty()) break;
+            p.include_dirs.insert(input);
+        }
+    }
+
+    std::cout << "Add extra libraries? (y/n): ";
+    std::getline(std::cin, input);
+    if (input == "y" || input == "Y") {
+        std::cout << "Enter library names (without -l, e.g. pthread, m):\n";
+        while (true) {
+            std::getline(std::cin, input);
+            if (input.empty()) break;
+            p.library.insert(input);
+        }
+    }
+}
+
+int main() {
+    ProjectInfo p;
+    user_setup(p);
+
+    std::cout << "\nGenerate Makefile now? (y/n): ";
+    std::string confirm;
+    std::getline(std::cin, confirm);
+    if (confirm != "y" && confirm != "Y") {
+        std::cout << "Cancelled.\n";
+        return 0;
+    }
+
+    generate_makefile(p, "Makefile");
+    std::cout << "\n✅ Makefile generated successfully as 'Makefile'.\n";
+}
